@@ -55,6 +55,7 @@ pkgs.testers.runNixOSTest {
     # Один процесс от initrd до конца: ни паники, ни перезапуска
     assert "panicked" not in journal, "bento-boot panicked"
     assert "Scheduled restart job" not in journal, "bento-boot was restarted"
+    assert "followed PID 1 into the real root" in journal, "bento-boot did not follow the switch"
     machine.succeed("systemctl show -p Result bento-boot.service | grep -q success")
     machine.screenshot("after")
   '';

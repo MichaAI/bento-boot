@@ -16,7 +16,7 @@ pub mod dbus;
 pub mod journal;
 pub mod kmsg;
 mod names;
-mod root;
+pub(crate) mod root;
 mod session;
 
 use std::sync::mpsc::Sender;
@@ -93,6 +93,7 @@ pub fn follow(tx: &Sender<Message>) {
                     let _ = tx.send(Message::Unreachable(format!("switching root: {e}")));
                     return;
                 }
+                eprintln!("bento-boot: followed PID 1 into the real root");
             }
             // A re-exec of the manager, or not up yet: try again shortly.
             _ => thread::sleep(Duration::from_millis(100)),

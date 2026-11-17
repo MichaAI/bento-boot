@@ -12,6 +12,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
@@ -463,13 +464,41 @@ impl Connection {
 
     /// The next signal, waiting as long as it takes.
     pub fn next_signal(&mut self) -> io::Result<Message> {
+        loop {
+            if let Some(m) = self.next_signal_within(Duration::from_secs(3600))? {
+                return Ok(m);
+            }
+        }
+    }
+
+    /// The next signal, or `None` if nothing came within `wait`. Waits
+    /// with `poll` before reading, so a timeout never cuts a message in
+    /// half.
+    pub fn next_signal_within(&mut self, wait: Duration) -> io::Result<Option<Message>> {
         if let Some(m) = self.queued.pop_front() {
-            return Ok(m);
+            return Ok(Some(m));
         }
         loop {
-            let m = self.read(None)?;
+            if self.stream.buffer().is_empty() {
+                let mut fd = libc::pollfd { fd: self.stream.get_ref().as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                let ms = libc::c_int::try_from(wait.as_millis()).unwrap_or(libc::c_int::MAX);
+                // SAFETY: one valid pollfd for the duration of the call.
+                let r = unsafe { libc::poll(&raw mut fd, 1, ms) };
+                if r < 0 {
+                    let e = io::Error::last_os_error();
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(e);
+                }
+                if r == 0 {
+                    return Ok(None);
+                }
+            }
+            // Once a message has started, the rest of it follows at once.
+            let m = self.read(Some(Duration::from_secs(5)))?;
             if m.is_signal() {
-                return Ok(m);
+                return Ok(Some(m));
             }
         }
     }

@@ -21,6 +21,13 @@ fn same_root() -> io::Result<bool> {
     Ok(ours.dev() == pid1.dev() && ours.ino() == pid1.ino())
 }
 
+/// Whether PID 1 now runs in another root than ours: it switched from the
+/// initrd and we have not followed yet.
+#[must_use]
+pub fn pid1_moved() -> bool {
+    same_root().is_ok_and(|same| !same)
+}
+
 /// Waits until PID 1 runs in another root than ours, then moves into it.
 /// Needs `CAP_SYS_CHROOT`.
 pub fn wait_for_new_root(timeout: Duration) -> io::Result<()> {

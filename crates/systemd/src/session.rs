@@ -114,10 +114,20 @@ impl Session {
             Ok(None) => {}
             Err(_) => return End::Disconnected,
         }
+        let initrd = crate::in_initrd();
         loop {
-            let Ok(m) = self.conn.next_signal() else { return End::Disconnected };
-            if let Some(end) = self.signal(&m, tx) {
-                return end;
+            match self.conn.next_signal_within(Duration::from_secs(1)) {
+                Ok(Some(m)) => {
+                    if let Some(end) = self.signal(&m, tx) {
+                        return end;
+                    }
+                }
+                // systemd carries its private connections across the
+                // re-exec into the real root, but no signals come on them
+                // any more: notice the move by PID 1's root instead.
+                Ok(None) if initrd && crate::root::pid1_moved() => return End::Disconnected,
+                Ok(None) => {}
+                Err(_) => return End::Disconnected,
             }
         }
     }
