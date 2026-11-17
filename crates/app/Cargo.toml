@@ -1,0 +1,35 @@
+[package]
+name = "bento-boot"
+description = "A graphical boot screen that shows systemd's jobs as orbits around a dithered fox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = ["kms"]
+# Draw straight on DRM/KMS with libinput for keys. Without it only
+# `bento-boot preview` works, which needs no C libraries.
+kms = ["slint/backend-linuxkms-noseat"]
+
+[dependencies]
+bento-boot-model.workspace = true
+bento-boot-secret.workspace = true
+bento-boot-systemd.workspace = true
+slint = { version = "1.19", default-features = false, features = [
+  "std",
+  "compat-1-18",
+  "renderer-software",
+  "software-renderer-systemfonts",
+] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1.2", default-features = false, features = ["parse", "serde", "std"] }
+libc = "0.2"
+
+[build-dependencies]
+slint-build = "1.19"
+
+[lints]
+workspace = true

@@ -1,0 +1,475 @@
+// Экран загрузки. Анимацию считает Rust: орбиты рисуются в `orbit`,
+// а здесь только то, что удобнее раскладывать: текст, плитки и поле
+// пароля. Шрифты подключает build.rs из BENTO_FONT_DIR.
+
+import "@fonts/Nunito-Regular.ttf";
+import "@fonts/Nunito-Bold.ttf";
+import "@fonts/Nunito-ExtraBold.ttf";
+import "@fonts/JetBrainsMono-Regular.ttf";
+
+export struct Palette {
+    base: color,
+    surface: color,
+    rings: color,
+    overlay: color,
+    subtext: color,
+    text: color,
+    accent: color,
+    accent2: color,
+    red: color,
+    green: color,
+    yellow: color,
+}
+
+// Подпись у точки на орбите.
+export struct Label {
+    x: length,
+    y: length,
+    text: string,
+    color: color,
+    opacity: float,
+    // -1 текст слева от точки, 1 справа
+    side: int,
+}
+
+// Строка плитки: имя, справа число, под ним полоска (0…1, <0 нет полоски).
+export struct Row {
+    name: string,
+    value: string,
+    detail: string,
+    color: color,
+    progress: float,
+}
+
+component Tile inherits Rectangle {
+    in property <Palette> p;
+    in property <string> title;
+    in property <color> title-color: p.subtext;
+    border-radius: 22px;
+    background: p.surface;
+    border-width: 1px;
+    border-color: p.rings;
+    Text {
+        x: 20px;
+        y: 14px;
+        text: root.title;
+        color: root.title-color;
+        font-size: 15px;
+        font-weight: 800;
+        letter-spacing: 0.6px;
+    }
+    @children
+}
+
+component Rows inherits Rectangle {
+    in property <Palette> p;
+    in property <[Row]> rows;
+    for r[i] in root.rows: Rectangle {
+        x: 20px;
+        y: 44px + i * 46px;
+        width: root.width - 40px;
+        height: 40px;
+        Text {
+            x: 0;
+            y: 0;
+            width: parent.width - 70px;
+            text: r.name;
+            color: p.text;
+            font-size: 16px;
+            font-weight: 700;
+            overflow: elide;
+        }
+        Text {
+            x: parent.width - 70px;
+            width: 70px;
+            y: 0;
+            text: r.value;
+            color: r.color;
+            font-size: 16px;
+            font-weight: 800;
+            horizontal-alignment: right;
+        }
+        if r.detail != "": Text {
+            x: 0;
+            y: 20px;
+            width: parent.width;
+            text: r.detail;
+            color: p.subtext;
+            font-size: 13px;
+            overflow: elide;
+        }
+        if r.progress >= 0: Rectangle {
+            x: 0;
+            y: 27px;
+            width: parent.width;
+            height: 6px;
+            border-radius: 3px;
+            background: p.rings;
+            Rectangle {
+                x: 0;
+                width: parent.width * clamp(r.progress, 0, 1);
+                height: parent.height;
+                border-radius: 3px;
+                background: @linear-gradient(90deg, p.accent2 0%, r.color 100%);
+            }
+        }
+    }
+}
+
+component Pill inherits Rectangle {
+    in property <string> glyph;
+    in property <string> value;
+    in property <color> tint;
+    in property <Palette> p;
+    height: 40px;
+    width: t.preferred-width + 54px;
+    border-radius: 20px;
+    background: p.surface;
+    border-width: 1px;
+    border-color: p.rings;
+    Rectangle {
+        x: 12px;
+        width: 22px;
+        height: 22px;
+        border-radius: 11px;
+        background: root.tint;
+        // Nunito has no ✓; JetBrains Mono has all four
+        Text {
+            text: root.glyph;
+            color: p.base;
+            font-family: "JetBrains Mono";
+            font-size: 14px;
+        }
+    }
+    t := Text {
+        x: 42px;
+        text: root.value;
+        color: p.text;
+        font-size: 17px;
+        font-weight: 800;
+    }
+}
+
+export component App inherits Window {
+    in property <Palette> p: {
+        base: #11111b,
+        surface: #1e1e2e,
+        rings: #313244,
+        overlay: #6c7086,
+        subtext: #a6adc8,
+        text: #cdd6f4,
+        accent: #cba6f7,
+        accent2: #f38ba8,
+        red: #f38ba8,
+        green: #a6e3a1,
+        yellow: #f9e2af,
+    };
+
+    // Слой орбит: квадрат orbit-size с центром в center-x/center-y.
+    in property <image> orbit;
+    in property <length> orbit-size;
+    in property <length> center-x;
+    in property <length> center-y;
+    in property <image> fox;
+    in property <length> fox-size: 240px;
+
+    in property <[Label]> labels;
+
+    in property <string> host;
+    in property <string> os;
+    in property <string> stage;
+    in property <color> stage-color: p.accent;
+    in property <string> clock;
+    in property <string> clock-note;
+
+    in property <bool> tiles: true;
+    in property <[Row]> running;
+    in property <[Row]> slowest;
+    in property <[Row]> failures;
+    in property <string> more-failures;
+    // Последние строки журнала самого свежего упавшего юнита
+    in property <[string]> failure-log;
+
+    // Шторка с журналом (F2 или Tab)
+    in property <float> drawer: 0;
+    in property <[string]> drawer-lines;
+
+    in property <int> done;
+    in property <int> failed;
+    in property <int> busy;
+    in property <int> waiting;
+
+    // Пароль
+    in property <bool> asking;
+    in property <float> ask-opacity;
+    in property <string> question;
+    in property <[color]> dots;
+    in property <bool> silent;
+    in property <length> shake;
+    in property <string> hint;
+
+    // 1 — всё видно, 0 — экран ушёл в фон (перед передачей SDDM)
+    in property <float> presence: 1;
+
+    callback key(string, bool);
+
+    title: "bento-boot";
+    background: p.base;
+    default-font-family: "Nunito";
+    forward-focus: keys;
+
+    keys := FocusScope {
+        key-pressed(e) => {
+            root.key(e.text, e.modifiers.control);
+            accept
+        }
+    }
+
+    Rectangle {
+        opacity: root.presence;
+
+        Image {
+            x: root.center-x - root.orbit-size / 2;
+            y: root.center-y - root.orbit-size / 2;
+            width: root.orbit-size;
+            height: root.orbit-size;
+            source: root.orbit;
+            image-rendering: pixelated;
+        }
+
+        Image {
+            x: root.center-x - root.fox-size / 2;
+            y: root.center-y - root.fox-size / 2;
+            width: root.fox-size;
+            height: root.fox-size;
+            source: root.fox;
+            image-rendering: pixelated;
+        }
+
+        for l in root.labels: Text {
+            x: l.side < 0 ? l.x - self.preferred-width - 20px : l.x + 20px;
+            y: l.y - self.preferred-height / 2;
+            text: l.text;
+            color: l.color;
+            opacity: l.opacity;
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        // Шапка: хост, система, стадия; справа часы
+        Text {
+            x: 44px;
+            y: 34px;
+            text: root.host;
+            color: p.text;
+            font-size: 34px;
+            font-weight: 800;
+        }
+        Text {
+            x: 46px;
+            y: 80px;
+            text: root.os;
+            color: p.subtext;
+            font-size: 16px;
+            font-weight: 700;
+        }
+        Rectangle {
+            x: 44px;
+            y: 112px;
+            height: 30px;
+            width: stage-text.preferred-width + 28px;
+            border-radius: 15px;
+            background: root.stage-color.with-alpha(0.16);
+            stage-text := Text {
+                text: root.stage;
+                color: root.stage-color;
+                font-size: 15px;
+                font-weight: 800;
+            }
+        }
+        Text {
+            x: root.width - self.preferred-width - 44px;
+            y: 28px;
+            text: root.clock;
+            color: p.text;
+            font-size: 44px;
+            font-weight: 800;
+        }
+        Text {
+            x: root.width - self.preferred-width - 46px;
+            y: 86px;
+            text: root.clock-note;
+            color: p.subtext;
+            font-size: 15px;
+            font-weight: 700;
+        }
+
+        // Плитки по бокам — если экран достаточно широкий
+        if root.tiles && root.running.length > 0: Tile {
+            p: root.p;
+            title: "СЕЙЧАС";
+            title-color: p.accent;
+            x: 44px;
+            y: root.height - self.height - 104px;
+            width: 340px;
+            height: 58px + root.running.length * 46px;
+            Rows {
+                p: root.p;
+                rows: root.running;
+                width: parent.width;
+                height: parent.height;
+            }
+        }
+        if root.tiles && root.slowest.length > 0: Tile {
+            p: root.p;
+            title: "ДОЛЬШЕ ВСЕХ";
+            x: root.width - self.width - 44px;
+            y: root.height - self.height - 104px;
+            width: 340px;
+            height: 58px + root.slowest.length * 46px;
+            Rows {
+                p: root.p;
+                rows: root.slowest;
+                width: parent.width;
+                height: parent.height;
+            }
+        }
+        if root.tiles && root.failures.length > 0: Tile {
+            p: root.p;
+            title: "УПАЛО" + root.more-failures;
+            title-color: p.red;
+            border-color: p.red.with-alpha(0.5);
+            x: root.width - self.width - 44px;
+            y: 164px;
+            width: 340px;
+            height: 58px + root.failures.length * 46px + (root.failure-log.length > 0 ? 12px + root.failure-log.length * 17px : 0);
+            Rows {
+                p: root.p;
+                rows: root.failures;
+                width: parent.width;
+                height: parent.height;
+            }
+            for line[i] in root.failure-log: Text {
+                x: 20px;
+                y: 52px + root.failures.length * 46px + i * 17px;
+                width: parent.width - 40px;
+                text: line;
+                color: p.subtext;
+                font-family: "JetBrains Mono";
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+
+        // Счётчики внизу по центру
+        HorizontalLayout {
+            x: (root.width - self.preferred-width) / 2;
+            y: root.height - 40px - 34px;
+            height: 40px;
+            spacing: 10px;
+            Pill { p: root.p; glyph: "✓"; value: root.done; tint: p.green; }
+            Pill { p: root.p; glyph: "~"; value: root.busy; tint: p.accent; }
+            Pill { p: root.p; glyph: "…"; value: root.waiting; tint: p.overlay; }
+            if root.failed > 0: Pill { p: root.p; glyph: "!"; value: root.failed; tint: p.red; }
+        }
+    }
+
+    // Шторка журнала снизу
+    if root.drawer > 0.01: Rectangle {
+        property <length> h: root.height * 0.46;
+        x: 24px;
+        width: root.width - 48px;
+        height: self.h;
+        y: root.height - self.h * root.drawer + 24px * (1 - root.drawer);
+        opacity: root.drawer;
+        border-radius: 22px;
+        background: p.surface.with-alpha(0.97);
+        border-width: 1px;
+        border-color: p.rings;
+        clip: true;
+        Text {
+            x: 22px;
+            y: 14px;
+            text: "ЖУРНАЛ";
+            color: p.accent;
+            font-size: 15px;
+            font-weight: 800;
+        }
+        Text {
+            x: parent.width - self.preferred-width - 22px;
+            y: 14px;
+            text: "F2 — спрятать";
+            color: p.overlay;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        // Новые строки внизу: список прижат к нижнему краю
+        for line[i] in root.drawer-lines: Text {
+            x: 22px;
+            y: parent.height - 18px - (root.drawer-lines.length - i) * 18px;
+            width: parent.width - 44px;
+            text: line;
+            color: p.subtext;
+            font-family: "JetBrains Mono";
+            font-size: 13px;
+            overflow: elide;
+            visible: self.y > 40px;
+        }
+    }
+
+    // Пароль: затемнение поверх орбит, поле под лисой
+    if root.asking: Rectangle {
+        opacity: root.ask-opacity;
+        Rectangle {
+            background: p.base.with-alpha(0.72);
+        }
+        field := Rectangle {
+            x: root.center-x - self.width / 2 + root.shake;
+            y: root.center-y + root.fox-size / 2 + 8px;
+            width: 380px;
+            height: 56px;
+            border-radius: 28px;
+            background: p.surface;
+            border-width: 2px;
+            border-color: p.accent;
+
+            if root.dots.length == 0 || root.silent: Text {
+                text: root.silent && root.dots.length > 0 ? "• • •" : "Пароль";
+                color: p.overlay;
+                font-size: 18px;
+                font-weight: 700;
+            }
+            if !root.silent: HorizontalLayout {
+                x: (parent.width - self.preferred-width) / 2;
+                y: (parent.height - 11px) / 2;
+                height: 11px;
+                spacing: 8px;
+                for c in root.dots: Rectangle {
+                    width: 11px;
+                    height: 11px;
+                    border-radius: 5.5px;
+                    background: c;
+                }
+            }
+        }
+        Text {
+            x: (root.width - self.width) / 2;
+            y: field.y + field.height + 16px;
+            width: min(self.preferred-width, root.width - 80px);
+            text: root.question;
+            color: p.subtext;
+            font-size: 16px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        Text {
+            x: (root.width - self.preferred-width) / 2;
+            y: field.y + field.height + 64px;
+            text: root.hint;
+            color: p.red;
+            font-size: 15px;
+            font-weight: 800;
+        }
+    }
+}

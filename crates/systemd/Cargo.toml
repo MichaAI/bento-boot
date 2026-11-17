@@ -1,0 +1,15 @@
+[package]
+name = "bento-boot-systemd"
+description = "Following systemd's jobs over D-Bus (a small client of its own), from the initrd through the switch to the real root"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bento-boot-model.workspace = true
+libc = "0.2"
+sdjournal = "0.1.22"
+
+[lints]
+workspace = true
