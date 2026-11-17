@@ -56,6 +56,8 @@ pkgs.testers.runNixOSTest {
     assert "panicked" not in journal, "bento-boot panicked"
     assert "Scheduled restart job" not in journal, "bento-boot was restarted"
     assert "followed PID 1 into the real root" in journal, "bento-boot did not follow the switch"
+    assert "connected to PID 1 (initrd)" in journal, "bento-boot never reached the initrd's manager"
+    assert "connected to PID 1 (real root)" in journal, "bento-boot never reached the real root's manager"
     machine.succeed("systemctl show -p Result bento-boot.service | grep -q success")
     machine.screenshot("after")
   '';

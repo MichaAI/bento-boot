@@ -91,7 +91,10 @@ pub struct Controller {
     finished_at: Option<Usec>,
     leaving: bool,
     presence: f32,
+    /// A problem with the config file, shown for the whole boot.
     note: Option<String>,
+    /// systemd not answering; cleared as soon as it does.
+    link_note: Option<String>,
     pix: Option<Pixmap>,
     seen_stage: Stage,
     /// The unit's last journal lines, by unit.
@@ -137,6 +140,7 @@ impl Controller {
             leaving: false,
             presence: 0.0,
             note: None,
+            link_note: None,
             pix: None,
             seen_stage: Stage::Connecting,
             unit_logs: HashMap::new(),
@@ -171,7 +175,13 @@ impl Controller {
 
     pub fn feed(&mut self, msg: Message, now: Usec) {
         match msg {
-            Message::Boot(e) => self.boot.apply(e, now),
+            Message::Boot(e) => {
+                // systemd answers again: whatever we said about it is stale.
+                if matches!(e, bento_boot_model::Event::Stage(_)) {
+                    self.link_note = None;
+                }
+                self.boot.apply(e, now);
+            }
             Message::Cause { unit, cause } => {
                 let reason = text::cause(&cause);
                 self.causes.insert(unit.clone(), reason.clone());
@@ -180,7 +190,7 @@ impl Controller {
             Message::Journal { unit, lines } => {
                 self.unit_logs.insert(unit, lines);
             }
-            Message::Unreachable(why) => self.note = Some(format!("systemd молчит: {why}")),
+            Message::Unreachable(why) => self.link_note = Some(format!("systemd молчит: {why}")),
         }
         if self.boot.stage != self.seen_stage {
             self.seen_stage = self.boot.stage;
@@ -370,7 +380,8 @@ impl Controller {
 
     fn header(&self, app: &App, now: Usec) {
         app.set_host(self.info.host.as_str().into());
-        app.set_os(self.note.as_deref().unwrap_or(&self.info.os).into());
+        let shown = self.link_note.as_deref().or(self.note.as_deref()).unwrap_or(&self.info.os);
+        app.set_os(shown.into());
         app.set_stage(text::stage(self.boot.stage).into());
         app.set_stage_color(match self.boot.stage {
             Stage::Finished => self.pal.green.slint(),

@@ -65,6 +65,7 @@ pub fn follow(tx: &Sender<Message>) {
         let end = match session::Session::connect() {
             Ok(mut s) => {
                 failures = 0;
+                eprintln!("bento-boot: connected to PID 1 ({})", if initrd { "initrd" } else { "real root" });
                 let stage = if initrd { Stage::Initrd } else { Stage::Main };
                 if tx.send(Message::Boot(Event::Stage(stage))).is_err() {
                     return;
@@ -73,7 +74,9 @@ pub fn follow(tx: &Sender<Message>) {
             }
             Err(e) => {
                 failures += 1;
-                if failures == 1 || failures.is_multiple_of(100) {
+                // Right after the switch the new manager takes a few
+                // seconds to listen again; only a longer silence is news.
+                if failures == 50 || failures.is_multiple_of(100) {
                     let _ = tx.send(Message::Unreachable(e.to_string()));
                 }
                 if failures > 600 {
