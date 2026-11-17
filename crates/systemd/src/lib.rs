@@ -57,6 +57,8 @@ pub fn startup_finished() -> Option<bool> {
 /// Follows the boot until the manager reports it finished. Runs on the
 /// calling thread; also returns when the receiver goes away.
 pub fn follow(tx: &Sender<Message>) {
+    // Before anything can switch: see the note in `root`.
+    root::hold_proc();
     let mut failures = 0u32;
     loop {
         let initrd = in_initrd();
