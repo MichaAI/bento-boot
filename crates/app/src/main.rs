@@ -127,6 +127,22 @@ fn drm_cards() -> Vec<String> {
     v
 }
 
+/// A display that died under us usually means the real GPU driver pushed
+/// the firmware framebuffer out. Give the new card a moment to register
+/// before deciding; an empty /sys right after the initrd switch says
+/// nothing (see the card check in the timer).
+#[cfg(feature = "kms")]
+fn gpu_changed(cards: &[String]) -> bool {
+    for _ in 0..20 {
+        let now = drm_cards();
+        if !now.is_empty() && now != cards {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 #[cfg(feature = "kms")]
 fn run(config_path: &std::path::Path) -> ExitCode {
     use std::cell::RefCell;
@@ -153,11 +169,12 @@ fn run(config_path: &std::path::Path) -> ExitCode {
         eprintln!("bento-boot: cannot follow systemd: {e}");
     }
 
+    let cards = drm_cards();
     if let Err(e) =
         slint::BackendSelector::new().backend_name("linuxkms".into()).renderer_name("software".into()).select()
     {
         eprintln!("bento-boot: no display: {e}");
-        return ExitCode::FAILURE;
+        return if gpu_changed(&cards) { ExitCode::from(EXIT_RESTART) } else { ExitCode::FAILURE };
     }
     let app = match App::new() {
         Ok(a) => a,
@@ -183,7 +200,6 @@ fn run(config_path: &std::path::Path) -> ExitCode {
     let quit_retain = Rc::new(RefCell::new(None::<bool>));
     let restart = Rc::new(RefCell::new(false));
     let control = Rc::new(RefCell::new(control));
-    let cards = drm_cards();
     let mut last_card_check = 0u64;
 
     let timer = slint::Timer::default();
@@ -193,6 +209,7 @@ fn run(config_path: &std::path::Path) -> ExitCode {
         let quit_retain = quit_retain.clone();
         let restart = restart.clone();
         let control = control.clone();
+        let cards = cards.clone();
         let mut scale_sent = false;
         timer.start(slint::TimerMode::Repeated, Duration::from_millis(33), move || {
             let Some(app) = app.upgrade() else { return };
@@ -239,7 +256,8 @@ fn run(config_path: &std::path::Path) -> ExitCode {
         eprintln!("bento-boot: {e}");
         return ExitCode::FAILURE;
     }
-    if let Err(e) = slint::run_event_loop() {
+    let loop_err = slint::run_event_loop().err();
+    if let Some(e) = &loop_err {
         eprintln!("bento-boot: {e}");
     }
     drop(timer);
@@ -253,5 +271,14 @@ fn run(config_path: &std::path::Path) -> ExitCode {
     if let Some(control) = control.borrow_mut().take() {
         control.finish();
     }
-    if *restart.borrow() { ExitCode::from(EXIT_RESTART) } else { ExitCode::SUCCESS }
+    if loop_err.is_some() && !*restart.borrow() && gpu_changed(&cards) {
+        *restart.borrow_mut() = true;
+    }
+    if *restart.borrow() {
+        ExitCode::from(EXIT_RESTART)
+    } else if loop_err.is_some() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
