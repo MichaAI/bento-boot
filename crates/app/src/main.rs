@@ -218,11 +218,17 @@ fn run(config_path: &std::path::Path) -> ExitCode {
             }
             let phys = app.window().size();
             let scale = if scale_cfg > 0.0 { scale_cfg } else { (phys.height as f32 / 1080.0).max(1.0) };
+            let size = (phys.width as f32 / scale, phys.height as f32 / scale);
             if !scale_sent {
+                // Одного ScaleFactorChanged мало: оно раздувает физическое
+                // окно за пределы dumb-буфера. Resized возвращает логический
+                // размер к phys/scale, и рендер снова лезет в буфер.
                 app.window().dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: scale });
+                app.window().dispatch_event(slint::platform::WindowEvent::Resized {
+                    size: slint::LogicalSize::new(size.0, size.1),
+                });
                 scale_sent = true;
             }
-            let size = (phys.width as f32 / scale, phys.height as f32 / scale);
             if c.tick(&app, now, size, scale) == controller::Next::Quit {
                 let _ = slint::quit_event_loop();
             }

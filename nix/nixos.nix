@@ -58,9 +58,12 @@ let
       # «@» в argv[0]: так systemd не добивает процесс при переезде
       ExecStart = "@${package}/bin/bento-boot @bento-boot run";
       ExecStopPost = "${package}/bin/bento-boot restore-console";
-      # Код 75 — видеокарта сменилась под нами (simpledrm → настоящий
-      # драйвер): стартуем заново уже на ней
-      Restart = "on-failure";
+      # Перезапуск только с кодом 75 — видеокарта сменилась под нами
+      # (simpledrm → настоящий драйвер). Остальные падения не рестартуем:
+      # crash-loop выхватывает консоль и DRM-master из-под запускающегося
+      # дисплей-менеджера
+      Restart = "no";
+      RestartForceExitStatus = "75";
       RestartSec = 0;
       NoNewPrivileges = true;
       LockPersonality = true;

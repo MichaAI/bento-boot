@@ -16,7 +16,9 @@ pkgs.testers.runNixOSTest {
       # KMS уже в initrd: иначе рисовать там не на чем
       boot.initrd.kernelModules = [ "bochs" ];
       virtualisation.memorySize = 2048;
-      virtualisation.qemu.options = [ "-vga std" ];
+      # Экран выше 1080p, чтобы scale > 1: на нём рендер однажды паниковал,
+      # пусть тест этот случай и держит
+      virtualisation.qemu.options = [ "-device" "VGA,edid=on,xres=1920,yres=1200" ];
 
       systemd.services.slow-a = {
         wantedBy = [ "multi-user.target" ];
