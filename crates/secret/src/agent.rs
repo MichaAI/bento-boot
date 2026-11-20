@@ -38,6 +38,8 @@ pub enum Change {
 pub struct Agent {
     dir: PathBuf,
     known: BTreeMap<PathBuf, Request>,
+    rejected: BTreeMap<PathBuf, String>,
+    directory_error: Option<io::ErrorKind>,
 }
 
 /// `CLOCK_MONOTONIC` in microseconds.
@@ -75,10 +77,10 @@ fn read_ask_file(path: &Path) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn request(file: &Path) -> Option<Request> {
-    let bytes = read_ask_file(file).ok()?;
-    let a = ask::parse(&bytes).ok()?;
-    Some(Request {
+fn request(file: &Path) -> io::Result<Request> {
+    let bytes = read_ask_file(file)?;
+    let a = ask::parse(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{e:?}")))?;
+    Ok(Request {
         file: file.to_owned(),
         socket: PathBuf::from(OsStr::from_bytes(a.socket)),
         message: String::from_utf8_lossy(a.message).chars().filter(|c| !c.is_control()).collect(),
@@ -93,7 +95,7 @@ fn request(file: &Path) -> Option<Request> {
 impl Agent {
     #[must_use]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into(), known: BTreeMap::new() }
+        Self { dir: dir.into(), known: BTreeMap::new(), rejected: BTreeMap::new(), directory_error: None }
     }
 
     #[must_use]
@@ -105,14 +107,25 @@ impl Agent {
     /// answered elsewhere, timed out or lost their asker.
     pub fn scan(&mut self) -> Vec<Change> {
         let mut present = Vec::new();
-        if let Ok(entries) = fs::read_dir(&self.dir) {
-            for e in entries.flatten() {
-                if e.file_name().as_bytes().starts_with(b"ask.") {
-                    present.push(e.path());
+        match fs::read_dir(&self.dir) {
+            Ok(entries) => {
+                self.directory_error = None;
+                for e in entries.flatten() {
+                    if e.file_name().as_bytes().starts_with(b"ask.") {
+                        present.push(e.path());
+                    }
                 }
+            }
+            Err(e) => {
+                // The directory is created lazily by the first asker.
+                if e.kind() != io::ErrorKind::NotFound && self.directory_error != Some(e.kind()) {
+                    eprintln!("bento-boot: cannot scan password requests: {e}");
+                }
+                self.directory_error = Some(e.kind());
             }
         }
         present.sort();
+        self.rejected.retain(|p, _| present.binary_search(p).is_ok());
 
         let mut changes = Vec::new();
         let gone: Vec<PathBuf> = self
@@ -129,9 +142,20 @@ impl Agent {
             if self.known.contains_key(&p) {
                 continue;
             }
-            if let Some(r) = request(&p).filter(|r| alive(r.pid) && !expired(r.not_after)) {
-                self.known.insert(p, r.clone());
-                changes.push(Change::Asked(r));
+            match request(&p) {
+                Ok(r) if alive(r.pid) && !expired(r.not_after) => {
+                    self.rejected.remove(&p);
+                    self.known.insert(p, r.clone());
+                    changes.push(Change::Asked(r));
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let reason = e.to_string();
+                    if self.rejected.get(&p) != Some(&reason) {
+                        eprintln!("bento-boot: cannot read password request {p:?}: {reason}");
+                        self.rejected.insert(p, reason);
+                    }
+                }
             }
         }
         changes

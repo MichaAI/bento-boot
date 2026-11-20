@@ -8,6 +8,7 @@
   libxkbcommon,
   fontconfig,
   callPackage,
+  python3,
 }:
 
 let
@@ -39,6 +40,22 @@ rustPlatform.buildRustPackage {
   ];
 
   env.BENTO_FONT_DIR = fonts;
+
+  # Software alpha blending must read cached RAM, not the GPU's mapped
+  # scanout buffer. Patch the writable vendor copy, keeping Cargo's file
+  # checksums accurate; the locked upstream crate stays unchanged.
+  postPatch = ''
+    vendor="$cargoDepsCopy/i-slint-backend-linuxkms-1.19.0"
+    patch -d "$vendor" -p1 < ${./patches/slint-kms-shadow-buffer.patch}
+    ${python3}/bin/python - "$vendor" <<'PY'
+    import hashlib, json, pathlib, sys
+    crate = pathlib.Path(sys.argv[1])
+    checksums = crate / ".cargo-checksum.json"
+    data = json.loads(checksums.read_text())
+    data["files"]["renderer/sw.rs"] = hashlib.sha256((crate / "renderer/sw.rs").read_bytes()).hexdigest()
+    checksums.write_text(json.dumps(data))
+    PY
+  '';
 
   passthru = { inherit fonts; };
 

@@ -10,7 +10,7 @@ use bento_boot_secret::Passphrase;
 use bento_boot_secret::agent::{self, Change, Request};
 use bento_boot_secret::prompt::{Key, Outcome};
 use bento_boot_systemd::Message;
-use slint::{Image, ModelRc, SharedString, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 use tiny_skia::Pixmap;
 
 use crate::color::Palette;
@@ -173,6 +173,20 @@ impl Controller {
         self.note = note;
     }
 
+    /// Requests already seen before the window was created, e.g. after a
+    /// DRM-driven process restart while systemd still awaits a passphrase.
+    pub fn seed_asks(&mut self, changes: Vec<Change>, now: Usec) {
+        for change in changes {
+            if let Change::Asked(req) = change {
+                if self.asking.is_none() {
+                    self.start_asking(req, now);
+                } else {
+                    self.queue.push_back(req);
+                }
+            }
+        }
+    }
+
     pub fn feed(&mut self, msg: Message, now: Usec) {
         match msg {
             Message::Boot(e) => {
@@ -203,6 +217,18 @@ impl Controller {
     /// Fade out and stop, e.g. when the display manager wants the screen.
     pub fn leave(&mut self) {
         self.leaving = true;
+    }
+
+    pub fn save_handoff(&self, app: &App) -> io::Result<()> {
+        let Some(frame) = self.fox.frame() else { return Ok(()) };
+        let size = app.window().size();
+        let scale = app.window().scale_factor();
+        crate::handoff::save(
+            frame,
+            app.get_center_x() * scale / size.width.max(1) as f32,
+            app.get_center_y() * scale / size.height.max(1) as f32,
+            app.get_fox_size() * scale / size.height.max(1) as f32,
+        )
     }
 
     pub fn key(&mut self, text: &str, control: bool, now: Usec) {
@@ -246,6 +272,7 @@ impl Controller {
     }
 
     fn start_asking(&mut self, req: Request, now: Usec) {
+        eprintln!("bento-boot: showing password request {:?}", req.file);
         let wrong =
             self.submitted.as_ref().is_some_and(|(id, at)| *id == req.id && now.saturating_sub(*at) < 60_000_000);
         self.hint = if wrong { "не подошло, давай ещё раз".to_owned() } else { String::new() };
@@ -474,6 +501,9 @@ impl Controller {
     fn password(&mut self, app: &App, now: Usec, dt: f32) {
         let target = if self.asking.is_some() { 1.0 } else { 0.0 };
         self.ask_alpha += (target - self.ask_alpha) * (1.0 - (-dt * 10.0).exp());
+        if (self.ask_alpha - target).abs() < 0.005 {
+            self.ask_alpha = target;
+        }
         app.set_asking(self.ask_alpha > 0.01);
         app.set_ask_opacity(self.ask_alpha);
         let shake = if now < self.shake_until {

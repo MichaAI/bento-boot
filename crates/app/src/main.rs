@@ -16,6 +16,7 @@ mod console;
 mod control;
 mod controller;
 mod fox;
+mod handoff;
 mod logs;
 mod preview;
 mod scene;
@@ -43,7 +44,7 @@ fn usage() -> ExitCode {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (cmd, rest) = match args.first().map(String::as_str) {
-        Some(c @ ("run" | "quit" | "restore-console" | "preview")) => (c, &args[1..]),
+        Some(c @ ("run" | "quit" | "restore-console" | "preview" | "prepare-fox")) => (c, &args[1..]),
         Some("-h" | "--help") => return usage(),
         _ => ("run", &args[..]),
     };
@@ -76,6 +77,20 @@ fn main() -> ExitCode {
     }
 
     match cmd {
+        "prepare-fox" => {
+            let (cfg, err) = config::Config::load(&config_path);
+            if let Some(err) = err {
+                eprintln!("bento-boot: {err}");
+                return ExitCode::FAILURE;
+            }
+            match fox::prepare(&cfg, &out) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("bento-boot prepare-fox: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         "quit" => match control::quit(retain, Duration::from_secs(5)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -158,11 +173,20 @@ fn run(config_path: &std::path::Path) -> ExitCode {
     use bento_boot_secret::agent::{Agent, monotonic_usec};
     use slint::ComponentHandle;
 
-    if !bento_boot_systemd::in_initrd() && bento_boot_systemd::startup_finished() == Some(true) {
+    // A DRM driver handoff can restart us after systemd has reached its
+    // default target. An outstanding ask-password request still needs the
+    // screen, so scan before applying the finished-boot fast path and carry
+    // those requests into the controller below.
+    let mut asker = Agent::system();
+    let initial_asks = asker.scan();
+    let has_initial_ask =
+        initial_asks.iter().any(|change| matches!(change, bento_boot_secret::agent::Change::Asked(_)));
+    if !bento_boot_systemd::in_initrd() && bento_boot_systemd::startup_finished() == Some(true) && !has_initial_ask {
         eprintln!("bento-boot: the boot is already over, nothing to show");
         return ExitCode::SUCCESS;
     }
     let (cfg, cfg_err) = config::Config::load(config_path);
+    handoff::clear();
     if let Err(e) = bento_boot_secret::memory::harden_process() {
         eprintln!("bento-boot: no core-dump protection: {e}");
     }
@@ -191,11 +215,8 @@ fn run(config_path: &std::path::Path) -> ExitCode {
     };
 
     let scale_cfg = cfg.screen.scale;
-    let ctl = Rc::new(RefCell::new(controller::Controller::new(
-        cfg,
-        Box::new(Agent::system()),
-        controller::SystemInfo::read,
-    )));
+    let ctl = Rc::new(RefCell::new(controller::Controller::new(cfg, Box::new(asker), controller::SystemInfo::read)));
+    ctl.borrow_mut().seed_asks(initial_asks, monotonic_usec());
     ctl.borrow_mut().set_note(cfg_err);
     ctl.borrow_mut().set_log_feed(logs::LogFeed::start());
     {
@@ -226,6 +247,7 @@ fn run(config_path: &std::path::Path) -> ExitCode {
             }
             if let Some(req) = control.borrow_mut().as_mut().and_then(control::Control::poll) {
                 *quit_retain.borrow_mut() = Some(req.retain);
+                app.set_handoff(req.retain);
                 c.leave();
             }
             if now.saturating_sub(last_card_check) > 500_000 {
@@ -267,10 +289,15 @@ fn run(config_path: &std::path::Path) -> ExitCode {
         eprintln!("bento-boot: {e}");
     }
     drop(timer);
+    let retain = quit_retain.borrow().unwrap_or(false);
+    if retain {
+        if let Err(e) = ctl.borrow().save_handoff(&app) {
+            eprintln!("bento-boot: cannot save greeter handoff: {e}");
+        }
+    }
     let _ = app.hide();
     drop(app);
 
-    let retain = quit_retain.borrow().unwrap_or(false);
     if let Some(console) = console {
         console.release(retain);
     }

@@ -210,6 +210,7 @@ export component App inherits Window {
 
     // 1 — всё видно, 0 — экран ушёл в фон (перед передачей SDDM)
     in property <float> presence: 1;
+    in property <bool> handoff: false;
 
     callback key(string, bool);
 
@@ -234,15 +235,6 @@ export component App inherits Window {
             width: root.orbit-size;
             height: root.orbit-size;
             source: root.orbit;
-            image-rendering: pixelated;
-        }
-
-        Image {
-            x: root.center-x - root.fox-size / 2;
-            y: root.center-y - root.fox-size / 2;
-            width: root.fox-size;
-            height: root.fox-size;
-            source: root.fox;
             image-rendering: pixelated;
         }
 
@@ -374,6 +366,17 @@ export component App inherits Window {
         }
     }
 
+    // При передаче в SDDM лиса остаётся, пока остальной интерфейс уходит.
+    Image {
+        x: root.center-x - root.fox-size / 2;
+        y: root.center-y - root.fox-size / 2;
+        width: root.fox-size;
+        height: root.fox-size;
+        source: root.fox;
+        image-rendering: pixelated;
+        opacity: root.handoff ? 1 : root.presence;
+    }
+
     // Шторка журнала снизу
     if root.drawer > 0.01: Rectangle {
         property <length> h: root.height * 0.46;
@@ -417,15 +420,15 @@ export component App inherits Window {
         }
     }
 
-    // Пароль: затемнение поверх орбит, поле под лисой
+    // Поле — часть сцены под лисой. Небольшая область появления,
+    // без полноэкранного полупрозрачного слоя поверх дерева.
     if root.asking: Rectangle {
+        x: root.center-x - self.width / 2 + root.shake;
+        y: root.center-y + root.fox-size / 2 + 8px;
+        width: 380px;
+        height: 170px;
         opacity: root.ask-opacity;
-        Rectangle {
-            background: p.base.with-alpha(0.72);
-        }
         field := Rectangle {
-            x: root.center-x - self.width / 2 + root.shake;
-            y: root.center-y + root.fox-size / 2 + 8px;
             width: 380px;
             height: 56px;
             border-radius: 28px;
@@ -453,7 +456,7 @@ export component App inherits Window {
             }
         }
         Text {
-            x: (root.width - self.width) / 2;
+            x: (parent.width - self.width) / 2;
             y: field.y + field.height + 16px;
             width: min(self.preferred-width, root.width - 80px);
             text: root.question;
@@ -464,7 +467,7 @@ export component App inherits Window {
             wrap: word-wrap;
         }
         Text {
-            x: (root.width - self.preferred-width) / 2;
+            x: (parent.width - self.preferred-width) / 2;
             y: field.y + field.height + 64px;
             text: root.hint;
             color: p.red;

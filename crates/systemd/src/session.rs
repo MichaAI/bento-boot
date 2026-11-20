@@ -66,13 +66,14 @@ fn text(props: &Value, key: &str) -> Option<String> {
 
 pub struct Session {
     conn: Connection,
+    private: bool,
     fetched: HashSet<String>,
 }
 
 impl Session {
     pub fn connect() -> std::io::Result<Self> {
-        let conn = match Connection::connect(Path::new(PRIVATE), None) {
-            Ok(c) => c,
+        let (conn, private) = match Connection::connect(Path::new(PRIVATE), None) {
+            Ok(c) => (c, true),
             Err(_) => {
                 let mut c = Connection::connect(Path::new(SYSTEM_BUS), Some(DEST))?;
                 // On the bus, signals only come with a match rule.
@@ -82,10 +83,10 @@ impl Session {
                     "AddMatch",
                     &["type='signal',sender='org.freedesktop.systemd1'"],
                 )?;
-                c
+                (c, false)
             }
         };
-        Ok(Self { conn, fetched: HashSet::new() })
+        Ok(Self { conn, private, fetched: HashSet::new() })
     }
 
     fn get_all(&mut self, path: &str, iface: &str) -> std::io::Result<Value> {
@@ -112,10 +113,18 @@ impl Session {
         match self.start(tx) {
             Ok(Some(end)) => return end,
             Ok(None) => {}
-            Err(_) => return End::Disconnected,
+            Err(e) => {
+                eprintln!("bento-boot: cannot read manager snapshot: {e}");
+                return End::Disconnected;
+            }
         }
         let initrd = crate::in_initrd();
         loop {
+            // Do not wait for an idle connection: boot signals can still
+            // be queued when PID 1 has already switched roots.
+            if initrd && crate::root::pid1_moved() {
+                return End::Disconnected;
+            }
             match self.conn.next_signal_within(Duration::from_secs(1)) {
                 Ok(Some(m)) => {
                     if let Some(end) = self.signal(&m, tx) {
@@ -127,7 +136,10 @@ impl Session {
                 // any more: notice the move by PID 1's root instead.
                 Ok(None) if initrd && crate::root::pid1_moved() => return End::Disconnected,
                 Ok(None) => {}
-                Err(_) => return End::Disconnected,
+                Err(e) => {
+                    eprintln!("bento-boot: manager connection lost: {e}");
+                    return End::Disconnected;
+                }
             }
         }
     }
@@ -137,7 +149,11 @@ impl Session {
     }
 
     fn start(&mut self, tx: &Sender<Message>) -> std::io::Result<Option<End>> {
-        self.conn.call(PATH, MANAGER, "Subscribe", &[])?;
+        // Private peers are subscribed by systemd automatically. Only
+        // clients of the shared system bus need an explicit Subscribe.
+        if !self.private {
+            self.conn.call(PATH, MANAGER, "Subscribe", &[])?;
+        }
 
         let target = self.conn.call(PATH, MANAGER, "GetDefaultTarget", &[])?;
         let target = target.first().and_then(Value::str).unwrap_or_default().to_owned();
@@ -148,8 +164,11 @@ impl Session {
         // a(usssoo): id, unit, type, state, job path, unit path
         let jobs = self.conn.call(PATH, MANAGER, "ListJobs", &[])?;
         let rows: Vec<Value> = jobs.first().map(|v| v.items().to_vec()).unwrap_or_default();
-        for row in rows {
-            let [id, unit, kind, state, _job, unit_path] = row.items() else { continue };
+        eprintln!("bento-boot: manager snapshot: {} jobs", rows.len());
+        // Publish every job before fetching per-unit properties. A slow
+        // GetAll must not leave the UI with just the first dot of a tree.
+        for row in &rows {
+            let [id, unit, kind, state, _job, _unit_path] = row.items() else { continue };
             let (Some(id), Some(unit)) = (id.u32(), unit.str()) else { continue };
             let e = Event::JobNew {
                 id,
@@ -160,12 +179,16 @@ impl Session {
             if Self::send(tx, e).is_err() {
                 return Ok(Some(End::ReceiverGone));
             }
-            let (unit, path) = (unit.to_owned(), unit_path.str().map(str::to_owned));
-            self.fetch_unit(&unit, path.as_deref(), tx);
+        }
+        for row in rows {
+            let [_id, unit, _kind, _state, _job, unit_path] = row.items() else { continue };
+            if let Some(unit) = unit.str() {
+                self.fetch_unit(unit, unit_path.str(), tx);
+            }
         }
         self.fetch_unit(&target, None, tx);
 
-        if self.finished() == Some(true) {
+        if !crate::in_initrd() && self.finished() == Some(true) {
             let _ = Self::send(tx, Event::StartupFinished);
             return Ok(Some(End::Finished));
         }
@@ -281,6 +304,11 @@ impl Session {
                 r
             }
             "StartupFinished" => {
+                // Finishing the initrd is followed by another manager;
+                // keep following it instead of ending the whole feed.
+                if crate::in_initrd() {
+                    return None;
+                }
                 let _ = Self::send(tx, Event::StartupFinished);
                 return Some(End::Finished);
             }

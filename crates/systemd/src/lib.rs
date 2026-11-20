@@ -90,7 +90,7 @@ pub fn follow(tx: &Sender<Message>) {
             Some(session::End::Finished) => return,
             // The initrd's manager went away: it is switching to the real
             // root. Follow it there.
-            Some(session::End::Disconnected) if initrd => {
+            Some(session::End::Disconnected) if initrd && root::pid1_moved() => {
                 if tx.send(Message::Boot(Event::Stage(Stage::SwitchingRoot))).is_err() {
                     return;
                 }

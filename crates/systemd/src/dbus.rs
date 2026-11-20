@@ -15,7 +15,7 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -412,6 +412,25 @@ impl Connection {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, format!("auth refused: {}", line.trim())));
         }
         reader.get_mut().write_all(b"BEGIN\r\n")?;
+        // sd-bus can consume BEGIN and the first method in one auth read,
+        // then leave that method buffered until the next socket event.
+        // Wait until BEGIN has left the Unix socket's send queue so that
+        // the binary message necessarily arrives as a new readable event.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut pending: libc::c_int = 0;
+            // SAFETY: TIOCOUTQ writes one int; the connected fd is live.
+            if unsafe { libc::ioctl(reader.get_ref().as_raw_fd(), libc::TIOCOUTQ, &raw mut pending) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if pending == 0 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "D-Bus peer did not consume BEGIN"));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
         let mut c = Self { stream: reader, dest, serial: 0, queued: VecDeque::new() };
         if dest.is_some() {
             c.call("/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", &[])?;
@@ -446,10 +465,17 @@ impl Connection {
     pub fn call(&mut self, path: &str, iface: &str, member: &str, args: &[&str]) -> io::Result<Vec<Value>> {
         self.serial = self.serial.wrapping_add(1).max(1);
         let serial = self.serial;
-        let msg = encode_call(serial, self.dest, path, iface, member, args);
+        let dest = if self.dest.is_some() && iface == "org.freedesktop.DBus" {
+            Some("org.freedesktop.DBus")
+        } else {
+            self.dest
+        };
+        let msg = encode_call(serial, dest, path, iface, member, args);
         self.stream.get_mut().write_all(&msg)?;
         loop {
-            let m = self.read(Some(Duration::from_secs(5)))?;
+            let m = self
+                .read(Some(Duration::from_secs(5)))
+                .map_err(|e| io::Error::new(e.kind(), format!("{iface}.{member}: {e}")))?;
             match m.kind {
                 METHOD_RETURN if m.reply_serial == Some(serial) => return Ok(m.body),
                 ERROR if m.reply_serial == Some(serial) => {
@@ -507,6 +533,34 @@ impl Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_method_does_not_coalesce_with_authentication() {
+        use std::os::unix::net::UnixListener;
+        let path = std::env::temp_dir().join(format!("bento-dbus-auth-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut socket = BufReader::new(socket);
+            let mut auth = String::new();
+            socket.read_line(&mut auth).unwrap();
+            socket.get_mut().write_all(b"OK 0123456789abcdef0123456789abcdef\r\n").unwrap();
+            // Make it likely that both writes would reach a slow auth
+            // reader together without the send-queue barrier.
+            std::thread::sleep(Duration::from_millis(30));
+            let mut received = [0; 4096];
+            let n = socket.read(&mut received).unwrap();
+            assert_eq!(&received[..n], b"BEGIN\r\n");
+            let mut head = [0; 16];
+            socket.read_exact(&mut head).unwrap();
+            assert_eq!(&head[..4], &[b'l', METHOD_CALL, 0, 1]);
+        });
+        let mut client = Connection::connect(&path, None).unwrap();
+        client.stream.get_mut().write_all(&encode_call(1, None, "/test", "test.Peer", "First", &[])).unwrap();
+        server.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn a_call_decodes_back() {

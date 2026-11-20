@@ -48,8 +48,17 @@ pub fn socket_path_ok(p: &[u8]) -> bool {
     if p.len() > MAX_SOCKET_PATH || p.len() <= ASK_DIR.len() || !p.starts_with(ASK_DIR) {
         return false;
     }
-    let name = &p[ASK_DIR.len()..];
-    name != b"." && name != b".." && name.iter().all(|&b| b != b'/' && b != 0 && b > b' ' && b != 0x7f)
+    // systemd can append "/sck.*" to a directory that already ends in
+    // '/'. Repeated separators still refer directly to ASK_DIR; only the
+    // basename must be free of separators and traversal components.
+    let mut name = &p[ASK_DIR.len()..];
+    while let Some(rest) = name.strip_prefix(b"/") {
+        name = rest;
+    }
+    !name.is_empty()
+        && name != b"."
+        && name != b".."
+        && name.iter().all(|&b| b != b'/' && b != 0 && b > b' ' && b != 0x7f)
 }
 
 fn trim(mut s: &[u8]) -> &[u8] {
@@ -196,11 +205,21 @@ Message=Please enter passphrase for disk root (cryptroot):\n";
     }
 
     #[test]
+    fn accepts_systemd_socket_with_repeated_directory_separator() {
+        let input = b"[Ask]\nSocket=/run/systemd/ask-password//sck.123\n";
+        assert_eq!(parse(input).unwrap().socket, b"/run/systemd/ask-password//sck.123");
+    }
+
+    #[test]
     fn rejects_sockets_elsewhere() {
         for bad in [
             &b"/tmp/sck.x"[..],
             b"/run/systemd/ask-password/",
             b"/run/systemd/ask-password/..",
+            b"/run/systemd/ask-password///",
+            b"/run/systemd/ask-password//..",
+            b"/run/systemd/ask-password//../other",
+            b"/run/systemd/ask-password//a/b",
             b"/run/systemd/ask-password/../../tmp/x",
             b"/run/systemd/ask-password/a/b",
             b"/run/systemd/ask-password/a b",

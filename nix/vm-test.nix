@@ -7,14 +7,38 @@
 pkgs.testers.runNixOSTest {
   name = "bento-boot";
   nodes.machine =
-    { pkgs, ... }:
+    { config, pkgs, ... }:
     {
       imports = [ module ];
       michaai.bootScreen.enable = true;
       # Лиса печётся через Qt под Xvfb — для теста хватит планеты
       michaai.bootScreen.fox.enable = false;
       # KMS уже в initrd: иначе рисовать там не на чем
-      boot.initrd.kernelModules = [ "bochs" ];
+      # A real cryptsetup request before the root mount: exercise discovery,
+      # rendering and keyboard input while only the initrd is available.
+      boot.initrd.kernelModules = [ "aes_generic" "cbc" "bochs" "loop" "dm_crypt" ];
+      boot.initrd.availableKernelModules = [ "aes_generic" "cbc" "xts" "sha256" "sha512" ];
+      boot.initrd.systemd.storePaths = [ pkgs.cryptsetup pkgs.coreutils ];
+      boot.initrd.systemd.services.bento-boot.serviceConfig.StandardError = "journal+console";
+      boot.initrd.systemd.services.test-unlock = {
+        wantedBy = [ "initrd.target" ];
+        before = [ "sysroot.mount" ];
+        after = [ "bento-boot.service" ];
+        unitConfig.DefaultDependencies = false;
+        serviceConfig = {
+          Type = "oneshot";
+          StandardOutput = "journal+console";
+          StandardError = "journal+console";
+        };
+        script = ''
+          ${pkgs.coreutils}/bin/truncate -s 32M /run/test-luks.img
+          printf '%s' 'test-unlock' | ${pkgs.cryptsetup}/bin/cryptsetup luksFormat \
+            --batch-mode --pbkdf pbkdf2 --pbkdf-force-iterations 1000 /run/test-luks.img -
+          ${config.boot.initrd.systemd.package}/bin/systemd-cryptsetup attach testcrypt /run/test-luks.img - luks
+          test -e /dev/mapper/testcrypt
+          echo 'test-unlock: encrypted volume unlocked'
+        '';
+      };
       virtualisation.memorySize = 2048;
       # Экран выше 1080p, чтобы scale > 1: на нём рендер однажды паниковал,
       # пусть тест этот случай и держит
@@ -35,6 +59,9 @@ pkgs.testers.runNixOSTest {
           ExecStart = "${pkgs.coreutils}/bin/sleep 15";
         };
       };
+      # Let the real-root tree and failures remain visible before handing
+      # the display away; the actual module does not delay the greeter.
+      systemd.services.bento-boot-quit.after = [ "slow-b.service" ];
       systemd.services.broken = {
         wantedBy = [ "multi-user.target" ];
         serviceConfig = {
@@ -47,7 +74,12 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     import time
     machine.start()
-    for i in range(14):
+    machine.wait_for_console_text("bento-boot: showing password request", timeout=90)
+    time.sleep(2)
+    machine.screenshot("initrd-password")
+    machine.send_chars("test-unlock\n")
+    machine.wait_for_console_text("test-unlock: encrypted volume unlocked", timeout=30)
+    for i in range(5):
         time.sleep(10)
         machine.screenshot(f"boot{i:02}")
     machine.wait_for_unit("multi-user.target")
@@ -60,6 +92,9 @@ pkgs.testers.runNixOSTest {
     assert "followed PID 1 into the real root" in journal, "bento-boot did not follow the switch"
     assert "connected to PID 1 (initrd)" in journal, "bento-boot never reached the initrd's manager"
     assert "connected to PID 1 (real root)" in journal, "bento-boot never reached the real root's manager"
+    initrd_journal, root_journal = journal.split("connected to PID 1 (real root)", 1)
+    assert "manager snapshot:" in initrd_journal, "missing initrd job tree"
+    assert "manager snapshot:" in root_journal, "missing real-root job tree"
     machine.succeed("systemctl show -p Result bento-boot.service | grep -q success")
     machine.screenshot("after")
   '';

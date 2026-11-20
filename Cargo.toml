@@ -18,7 +18,7 @@ unsafe_op_in_unsafe_fn = "deny"
 unexpected_cfgs = { level = "warn" }
 
 [profile.release]
-opt-level = "s"
+opt-level = 3
 lto = "thin"
 codegen-units = 1
 panic = "abort"

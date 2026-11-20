@@ -82,6 +82,9 @@ pub fn palette(cfg: &[String], pal: &Palette) -> [Rgb; 4] {
 }
 
 impl Fox {
+    pub fn frame(&self) -> Option<usize> {
+        self.shown
+    }
     /// Loads `frame-0.png`, `frame-1.png`, … from `dir`.
     #[must_use]
     pub fn load(dir: Option<&Path>, fps: f32, pixel: u32, palette: Option<[Rgb; 4]>) -> Self {
@@ -114,6 +117,34 @@ impl Fox {
         }
         self.image.clone()
     }
+}
+
+/// The greeter reuses exactly the same coloured frames as the boot screen.
+/// This runs at build time, without a display or a Slint event loop.
+pub fn prepare(cfg: &crate::config::Config, out: &Path) -> std::io::Result<()> {
+    let dir = cfg.fox.frames.as_deref().ok_or_else(|| std::io::Error::other("no fox frames"))?;
+    let pal = Palette::from_config(&cfg.colors);
+    let colors = palette(&cfg.fox.palette, &pal);
+    std::fs::create_dir_all(out)?;
+    let mut count = 0;
+    loop {
+        let path = dir.join(format!("frame-{count}.png"));
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && count > 0 => break,
+            Err(e) => return Err(e),
+        };
+        let (rgba, w, h) = decode(&bytes).ok_or_else(|| std::io::Error::other("invalid fox PNG"))?;
+        let pixels = dither(&rgba, w, h, cfg.fox.pixel, &colors);
+        let file = std::io::BufWriter::new(std::fs::File::create(out.join(format!("frame-{count}.png")))?);
+        let mut encoder = png::Encoder::new(file, w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header()?.write_image_data(pixels.as_bytes())?;
+        count += 1;
+    }
+    std::fs::write(out.join("count"), count.to_string())?;
+    Ok(())
 }
 
 const BAYER: [[f32; 4]; 4] =

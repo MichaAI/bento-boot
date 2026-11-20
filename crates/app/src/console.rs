@@ -90,10 +90,14 @@ impl Drop for Console {
 /// For `ExecStopPost=`: whatever happened to us, the console is usable
 /// again. Keeps graphics mode only if we left it on purpose.
 pub fn restore() -> io::Result<()> {
+    // The display manager can already own the active VT by the time
+    // ExecStopPost runs. release() restored our keyboard before the ack;
+    // touching the new owner's VT here would race the greeter.
+    if Path::new(RETAIN_MARKER).exists() {
+        return Ok(());
+    }
     let tty = active_vt()?;
     let _ = ioctl_int(&tty, KDSKBMODE, K_UNICODE);
-    if !Path::new(RETAIN_MARKER).exists() {
-        ioctl_int(&tty, KDSETMODE, KD_TEXT)?;
-    }
+    ioctl_int(&tty, KDSETMODE, KD_TEXT)?;
     Ok(())
 }

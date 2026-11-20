@@ -4,6 +4,7 @@
   config,
   lib,
   pkgs,
+  options,
   ...
 }:
 
@@ -39,13 +40,21 @@ let
   };
 
   hasDisplayManager = config.services.displayManager.enable || config.services.xserver.enable;
+  hasBentoTheme = options ? michaai.sddm.enable && config.michaai.sddm.enable;
+
+  greeterFrames = pkgs.runCommand "bento-greeter-frames" { } ''
+    ${package}/bin/bento-boot prepare-fox --config ${configFile} --out "$out"
+  '';
 
   # Один и тот же юнит в initrd и в системе: после переезда в настоящий
   # корень systemd узнаёт в нём уже запущенный и не стартует второй раз
   unit = {
     description = "Boot screen";
     wantedBy = [ "sysinit.target" ];
-    after = [ "systemd-udevd.service" ];
+    after = [
+      "systemd-udevd.service"
+      "systemd-modules-load.service"
+    ];
     unitConfig = {
       DefaultDependencies = false;
       # Переход в initrd-switch-root.target его не останавливает
@@ -102,6 +111,12 @@ in
       type = types.bool;
       default = true;
       description = "Убрать строки ядра и systemd с консоли под экраном.";
+    };
+
+    sddmHandoff = mkOption {
+      type = types.bool;
+      default = hasBentoTheme && cfg.fox.enable;
+      description = "Продолжить анимацию лисы и плавно перенести её в плитку темы michaai.sddm.";
     };
 
     colors = mkOption {
@@ -191,11 +206,15 @@ in
     };
   };
 
-  config = lib.mkIf cfg.enable {
+  config = lib.mkIf cfg.enable ({
     assertions = [
       {
         assertion = !config.boot.plymouth.enable;
         message = "michaai.bootScreen заменяет Plymouth: выключи boot.plymouth.enable.";
+      }
+      {
+        assertion = !cfg.sddmHandoff || (hasBentoTheme && cfg.fox.enable);
+        message = "michaai.bootScreen.sddmHandoff требует michaai.sddm и fox.enable.";
       }
     ];
 
@@ -252,5 +271,13 @@ in
       "udev.log_level=3"
       "systemd.show_status=auto"
     ];
-  };
+  } // lib.optionalAttrs (options ? michaai.sddm.settings) {
+    michaai.sddm.settings = lib.mkIf cfg.sddmHandoff {
+      bootFrames = "${greeterFrames}";
+      bootFrameCount = frames.frames;
+      bootFps = cfg.fox.fps;
+      bootModelRatio = 1.0 * cfg.fox.modelSize / cfg.fox.size;
+      bootBase = cfg.colors.base or "#11111b";
+    };
+  });
 }
