@@ -111,8 +111,10 @@ fn run(_: &std::path::Path) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Names of the DRM cards, to notice the firmware framebuffer handing over
-/// to the real driver.
+/// Identity of the DRM cards, to notice the firmware framebuffer handing
+/// over to the real driver. The name alone is not enough: the new driver
+/// can take the minor the old one just freed, so card0 stays card0 while
+/// simpledrm turns into i915. Pair each card with its driver instead.
 #[cfg(feature = "kms")]
 fn drm_cards() -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir("/sys/class/drm")
@@ -120,6 +122,10 @@ fn drm_cards() -> Vec<String> {
             d.flatten()
                 .filter_map(|e| e.file_name().into_string().ok())
                 .filter(|n| n.starts_with("card") && !n.contains('-'))
+                .map(|n| match std::fs::read_link(format!("/sys/class/drm/{n}/device/driver")) {
+                    Ok(p) => format!("{n}:{}", p.file_name().unwrap_or_default().to_string_lossy()),
+                    Err(_) => n,
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -180,7 +186,7 @@ fn run(config_path: &std::path::Path) -> ExitCode {
         Ok(a) => a,
         Err(e) => {
             eprintln!("bento-boot: {e}");
-            return ExitCode::FAILURE;
+            return if gpu_changed(&cards) { ExitCode::from(EXIT_RESTART) } else { ExitCode::FAILURE };
         }
     };
 
@@ -254,7 +260,7 @@ fn run(config_path: &std::path::Path) -> ExitCode {
 
     if let Err(e) = app.show() {
         eprintln!("bento-boot: {e}");
-        return ExitCode::FAILURE;
+        return if gpu_changed(&cards) { ExitCode::from(EXIT_RESTART) } else { ExitCode::FAILURE };
     }
     let loop_err = slint::run_event_loop().err();
     if let Some(e) = &loop_err {
